@@ -1,6 +1,7 @@
 # tgtgSecAPI
 
-###Too Good To Go Api with FASTAPI.
+##Too Good To Go Api with FASTAPI.
+
 You can just use solo FastAPI for your project.
 
 Basic Front with React JS (Display favourite shop and add to mongo db cloud with day to check if the deal is available)
