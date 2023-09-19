@@ -1,0 +1,134 @@
+#DOCKER COMPOSE WITH STRONG SECURITY.
+#IPTABLES SSH DROP JUSTE ACCEPT FOR HOME IP IN HOST DOCKER.
+#WHITELIST TRAEFIK FOR API AUTHORIZE JUSTE NEEDED IP (HOME, PUBLIC IP SERVER, MOBILE NETWORK)
+# ONLINE SOURCE FOR LEARNING : https://docs.ibracorp.io/crowdsec/ AND https://github.com/fbonalair/traefik-crowdsec-bouncer/blob/main/docker-compose.yaml
+# AND https://github.com/fbonalair/traefik-crowdsec-bouncer/issues/16
+version: "3"
+
+services:
+  crowdsec:
+    image: crowdsecurity/crowdsec
+    container_name: crowdsec
+    expose:
+      - 8080
+    environment:
+      PGID: "1000"
+      COLLECTIONS: "crowdsecurity/traefik crowdsecurity/http-cve"
+    volumes:
+      - /opt/appdata/crowdsec/data:/var/lib/crowdsec/data
+      - /opt/appdata/crowdsec:/etc/crowdsec
+      - /var/log/auth.log:/var/log/auth.log:ro
+      - /var/log/crowdsec:/var/log/crowdsec:ro
+    restart: unless-stopped
+    networks:
+      - proxy
+  traefik:
+    restart: unless-stopped
+    image: traefik:v2.10.4
+    command:
+      - --log.filePath=/var/logs/traefik.log
+      - --log.level=INFO # (Default: error) DEBUG, INFO, WARN, ERROR, FATAL, PANIC
+      - --accessLog=true
+      - --accessLog.filePath=/var/log/crowdsec/traefik.log
+      - --accessLog.bufferingSize=100 # Configuring a buffer of 100 lines
+      - --accessLog.filters.statusCodes=204-299,400-499,500-59 # Ajout du niveau de journalisation de débogage
+      - --providers.docker=true
+      - --entrypoints.web.address=:80
+      - --entrypoints.websecure.address=:443
+      - --certificatesresolvers.myresolver.acme.email=youremail@mail.com
+      - --certificatesresolvers.myresolver.acme.caserver=https://acme-v02.api.letsencrypt.org/directory
+      - --certificatesresolvers.myresolver.acme.keytype=RSA4096
+      - --certificatesresolvers.myresolver.acme.tlschallenge=true
+      - --certificatesresolvers.myresolver.acme.httpchallenge=true
+      - --certificatesresolvers.myresolver.acme.httpchallenge.entrypoint=web
+      - --certificatesresolvers.myresolver.acme.storage=/letsencrypt/acme.json
+      - "--entrypoints.http.http.middlewares=crowdsec-bouncer@docker"
+      - "--entrypoints.https.http.middlewares=crowdsec-bouncer@docker"
+    ports:
+      - "80:80"
+      - "443:443"
+    volumes:
+      - "/var/log/crowdsec/:/var/log/crowdsec/"
+      - "./letsencrypt:/letsencrypt"
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+    networks:
+      - proxy
+      - app-net
+  crowdsec-traefik-bouncer:
+    image: fbonalair/traefik-crowdsec-bouncer
+    container_name: bouncer-traefik
+    expose:
+      - 8080
+    environment:
+      CROWDSEC_BOUNCER_API_KEY: #BOUNCER API KEY
+      CROWDSEC_AGENT_HOST: crowdsec:8080
+      GIN_MODE: release
+    depends_on:
+      - crowdsec
+    restart: unless-stopped
+    networks:
+      - proxy
+    labels:
+      - "traefik.enable=true"
+      - "traefik.http.middlewares.crowdsec-bouncer.forwardauth.address=http://bouncer-traefik:8080/api/v1/forwardAuth"
+      - "traefik.http.middlewares.crowdsec-bouncer.forwardauth.trustForwardHeader=true"
+      - "traefik.http.services.crowdsec-bouncer.loadbalancer.server.port=8080"
+  front-api:
+    restart: unless-stopped
+    image: local/front-api
+    labels:
+      # Create bouncer middleware
+      - "traefik.http.middlewares.crowdsec-bouncer.forwardauth.address=http://bouncer-traefik:8080/api/v1/forwardAuth"
+      - "traefik.http.middlewares.crowdsec-bouncer.forwardauth.trustForwardHeader=true"
+      - "traefik.enable=true"
+      - traefik.http.routers.front-api.rule=Host(`tgtg.yourdomain.com`)
+      - traefik.http.routers.front-api.tls=true
+      - traefik.http.routers.front-api.tls.certresolver=myresolver
+      - traefik.http.middlewares.front-api-whitelist.ipwhitelist.sourcerange=127.0.0.1, #Add ,YourIPHome, RangeIPMobileHome
+      - traefik.http.routers.front-api.middlewares=front-api-whitelist,crowdsec-bouncer@docker
+    networks:
+      - app-net
+  fastapi:
+    restart: unless-stopped
+    image: local/python-api
+    env_file:
+      - ./.env_fastapi
+    labels:
+      - "traefik.http.middlewares.crowdsec-bouncer.forwardauth.address=http://bouncer-traefik:8080/api/v1/forwardAuth"
+      - "traefik.http.middlewares.crowdsec-bouncer.forwardauth.trustForwardHeader=true"
+      - "traefik.enable=true"
+      - traefik.http.routers.fastapi.rule=Host(`apitgtg.yourdomain.com`)
+      - traefik.http.routers.fastapi.tls=true
+      - traefik.http.routers.fastapi.tls.certresolver=myresolver
+      - traefik.http.middlewares.fastapi-whitelist.ipwhitelist.sourcerange=127.0.0.1 #Add ,YourIPHome, RangeIPMobileHome
+      - traefik.http.routers.fastapi.middlewares=fastapi-whitelist,crowdsec-bouncer@docker
+    networks:
+      - app-net
+  ntfy:
+    image: binwiederhier/ntfy
+    command:
+      - serve
+    environment:
+      - TZ=UTC
+    volumes:
+      - /var/cache/ntfy:/var/cache/ntfy
+      - /etc/ntfy:/etc/ntfy
+    labels:
+      - "traefik.http.middlewares.crowdsec-bouncer.forwardauth.address=http://bouncer-traefik:8080/api/v1/forwardAuth"
+      - "traefik.http.middlewares.crowdsec-bouncer.forwardauth.trustForwardHeader=true"
+      - "traefik.enable=true"
+      - traefik.http.routers.ntfy.rule=Host(`ntfy.yourdomain.com`)
+      - traefik.http.routers.ntfy.tls=true
+      - traefik.http.routers.ntfy.tls.certresolver=myresolver
+      - traefik.http.middlewares.ntfy-whitelist.ipwhitelist.sourcerange=127.0.0.1 #Add ,YourIPHome, RangeIPMobileHome
+      - traefik.http.routers.ntfy.middlewares=ntfy-whitelist,crowdsec-bouncer@docker
+    restart: unless-stopped
+    networks:
+      - app-net
+
+networks:
+  proxy:
+    external: true
+
+  app-net:
+    driver: bridge # Crée un réseau bridge pour les applications
