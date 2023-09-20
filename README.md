@@ -46,6 +46,9 @@ il suffit de rentrer dans le dossier front-api
 
 ```cd front-api/```
 
+Modifier dans le fichier package.json la ligne proxy par votre url d'api.
+```  "proxy": "https://api.domain.com",```
+
 Ensuite il faut build l'image docker
 
 ```
