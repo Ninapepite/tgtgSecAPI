@@ -120,7 +120,10 @@ Vu sur les alertes :
 
 
 # English Section
-You can just use solo FastAPI for your project.
+
+This code will enable you to perform a few tasks related to TooGoodToGo via API.
+You can repeat the example and add other routes if you're interested.
+Api exposure in wan possible thanks to whitelist + crowdsec security
 
 
 
