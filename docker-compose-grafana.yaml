@@ -1,0 +1,163 @@
+version: "3"
+
+services:
+  crowdsec:
+    image: crowdsecurity/crowdsec
+    container_name: crowdsec
+    expose:
+      - 8080
+    environment:
+      PGID: "1000"
+      COLLECTIONS: "crowdsecurity/traefik crowdsecurity/http-cve"
+    volumes:
+      - /opt/appdata/crowdsec/data:/var/lib/crowdsec/data
+      - /opt/appdata/crowdsec:/etc/crowdsec
+      - /var/log/auth.log:/var/log/auth.log:ro
+      - /var/log/crowdsec:/var/log/crowdsec:ro
+    restart: unless-stopped
+    networks:
+      - proxy
+  traefik:
+    restart: unless-stopped
+    image: traefik:v2.10.4
+    command:
+      - --log.filePath=/var/logs/traefik.log
+      - --log.level=DEBUG # (Default: error) DEBUG, INFO, WARN, ERROR, FATAL, PANIC
+      - --accessLog=true
+      - --accessLog.filePath=/var/log/crowdsec/traefik.log
+      - --accessLog.bufferingSize=100 # Configuring a buffer of 100 lines
+      - --accessLog.filters.statusCodes=204-299,400-499,500-59 # Ajout du niveau de journalisation de débogage
+      - --providers.docker=true
+      - --entrypoints.web.address=:80
+      - --entrypoints.websecure.address=:443
+      - --certificatesresolvers.myresolver.acme.email=killian.stein@viacesi.fr
+      - --certificatesresolvers.myresolver.acme.caserver=https://acme-v02.api.letsencrypt.org/directory
+      - --certificatesresolvers.myresolver.acme.keytype=RSA4096
+      - --certificatesresolvers.myresolver.acme.tlschallenge=true
+      - --certificatesresolvers.myresolver.acme.httpchallenge=true
+      - --certificatesresolvers.myresolver.acme.httpchallenge.entrypoint=web
+      - --certificatesresolvers.myresolver.acme.storage=/letsencrypt/acme.json
+      - "--entrypoints.http.http.middlewares=crowdsec-bouncer@docker"
+      - "--entrypoints.https.http.middlewares=crowdsec-bouncer@docker"
+    #  - --providers.docker.network=proxy
+   #network_mode: host
+    ports:
+      - "80:80"
+      - "443:443"
+ #     - /opt/appdata/traefik/:/etc/traefik/
+#      - /var/log/crowdsec/:/var/log/crowdsec/
+    volumes:
+      - "/var/log/crowdsec/:/var/log/crowdsec/"
+#      - "./fileConfig.yml:/etc/traefik/fileConfig.yml"
+      - "./letsencrypt:/letsencrypt"
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+    networks:
+      - proxy
+      - app-net
+  crowdsec-traefik-bouncer:
+    image: fbonalair/traefik-crowdsec-bouncer
+    container_name: bouncer-traefik
+    expose:
+      - 8080
+    environment:
+      CROWDSEC_BOUNCER_API_KEY: 5jnbjbjnk
+      CROWDSEC_AGENT_HOST: crowdsec:8080
+      GIN_MODE: release
+    depends_on:
+      - crowdsec
+    restart: unless-stopped
+    networks:
+      - proxy
+    labels:
+      - "traefik.enable=true"
+      - "traefik.http.middlewares.crowdsec-bouncer.forwardauth.address=http://bouncer-traefik:8080/api/v1/forwardAuth"
+      - "traefik.http.middlewares.crowdsec-bouncer.forwardauth.trustForwardHeader=true"
+      - "traefik.http.services.crowdsec-bouncer.loadbalancer.server.port=8080"
+  front-api:
+    restart: unless-stopped
+    image: local/front-api
+    labels:
+      # Create bouncer middleware
+      - "traefik.http.middlewares.crowdsec-bouncer.forwardauth.address=http://bouncer-traefik:8080/api/v1/forwardAuth"
+      - "traefik.http.middlewares.crowdsec-bouncer.forwardauth.trustForwardHeader=true"
+      - "traefik.enable=true"
+      - traefik.http.routers.front-api.rule=Host(`tgtg.ninapepite.ovh`)
+      - traefik.http.routers.front-api.tls=true
+      - traefik.http.routers.front-api.tls.certresolver=myresolver
+     # - "traefik.http.middlewares.testheader.headers.accesscontrolallowheaders=*"
+      - traefik.http.middlewares.front-api-whitelist.ipwhitelist.sourcerange=127.0.0.1, 
+      - traefik.http.routers.front-api.middlewares=front-api-whitelist,crowdsec-bouncer@docker
+    networks:
+      - app-net
+  fastapi:
+    restart: unless-stopped
+    image: local/python-api
+    env_file:
+      - ./.env_fastapi
+  #  environment:
+   #   - 
+    labels:
+      - "traefik.http.middlewares.crowdsec-bouncer.forwardauth.address=http://bouncer-traefik:8080/api/v1/forwardAuth"
+      - "traefik.http.middlewares.crowdsec-bouncer.forwardauth.trustForwardHeader=true"
+      - "traefik.enable=true"
+      - traefik.http.routers.fastapi.rule=Host(`apitgtg.ninapepite.ovh`)
+      - traefik.http.routers.fastapi.tls=true
+      - traefik.http.routers.fastapi.tls.certresolver=myresolver
+      - traefik.http.middlewares.fastapi-whitelist.ipwhitelist.sourcerange=127.0.0.1, 
+      - traefik.http.routers.fastapi.middlewares=fastapi-whitelist,crowdsec-bouncer@docker
+    networks:
+      - app-net
+  ntfy:
+    image: binwiederhier/ntfy
+    command:
+      - serve
+    environment:
+      - TZ=UTC
+    volumes:
+      - /var/cache/ntfy:/var/cache/ntfy
+      - /etc/ntfy:/etc/ntfy
+    labels:
+      - "traefik.http.middlewares.crowdsec-bouncer.forwardauth.address=http://bouncer-traefik:8080/api/v1/forwardAuth"
+      - "traefik.http.middlewares.crowdsec-bouncer.forwardauth.trustForwardHeader=true"
+      - "traefik.enable=true"
+      - traefik.http.routers.ntfy.rule=Host(`ntfy.ninapepite.ovh`)
+      - traefik.http.routers.ntfy.tls=true
+      - traefik.http.routers.ntfy.tls.certresolver=myresolver
+      - traefik.http.middlewares.ntfy-whitelist.ipwhitelist.sourcerange=127.0.0.1,
+      - traefik.http.routers.ntfy.middlewares=ntfy-whitelist,crowdsec-bouncer@docker
+    restart: unless-stopped
+    networks:
+      - app-net
+#    restart: unless-stopped
+  grafana:
+    image: grafana/grafana:latest
+    container_name: grafana
+    volumes:
+      - datagf:/etc/grafana:rw
+ #   ports: 
+#      - 3000:3000
+    environment:
+      GF_SERVER_ROOT_URL: https://grafana.ninapepite.ovh
+      GF_INSTALL_PLUGINS: volkovlabs-rss-datasource
+      GF_PANELS_DISABLE_SANITIZE_HTML: true
+    labels:
+      # Create bouncer middleware
+      - "traefik.http.middlewares.crowdsec-bouncer.forwardauth.address=http://bouncer-traefik:8080/api/v1/forwardAuth"
+      - "traefik.http.middlewares.crowdsec-bouncer.forwardauth.trustForwardHeader=true"
+      - "traefik.enable=true"
+      - traefik.http.routers.grafana.rule=Host(`grafana.ninapepite.ovh`)
+      - traefik.http.routers.grafana.tls=true
+      - traefik.http.routers.grafana.tls.certresolver=myresolver
+      - traefik.http.routers.grafana.middlewares=crowdsec-bouncer@docker
+    networks:
+      - app-net
+     # - proxy
+    restart: unless-stopped
+networks:
+  proxy:
+    external: true
+
+  app-net:
+    driver: bridge # Crée un réseau bridge pour les applications
+volumes:
+  datagf: {}
